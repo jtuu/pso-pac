@@ -43,15 +43,7 @@ fn align_up(n: u32, to: u32) -> u32 {
 
 const ITEM_ALIGN: u32 = 0x20;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args();
-    let argc = args.len();
-    let pac_path = args.next_back();
-    if argc < 2 || pac_path.is_none() {
-        return Err(Box::from("Missing argument"));
-    }
-
-    let pac_path = pac_path.unwrap();
+fn extract_pac(pac_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let file_contents = fs::read(pac_path)?;
 
     let mut read_offset = 0;
@@ -95,14 +87,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let mut output_file = std::fs::File::create(output_path)?;
-        let p = [wav_header].as_ptr().cast();
-        let d = unsafe { std::slice::from_raw_parts(p, size_of::<WavHeader>()) };
-        output_file.write_all(d)?;
+        let wav_header_as_ptr = [wav_header].as_ptr().cast();
+        let wav_header_as_bytes = unsafe { std::slice::from_raw_parts(wav_header_as_ptr, size_of::<WavHeader>()) };
+        output_file.write_all(wav_header_as_bytes)?;
         output_file.write_all(audio_data)?;
         
         read_offset += item_header.size2 as usize;
         read_offset = align_up(read_offset as u32, ITEM_ALIGN) as usize;
         item_counter += 1;
     }
+    
     return Ok(());
+}
+
+fn create_pac(wav_paths: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut output_file = std::fs::File::create("out.pac")?;
+    let mut write_size = 0;
+    for wav_path in wav_paths {
+        let wav = fs::read(wav_path)?;
+        let (_, wav_header, _) = unsafe {
+            wav[0..size_of::<WavHeader>()].align_to::<WavHeader>()
+        };
+        if wav_header.len() != 1 {
+            return Err(Box::from("Failed to parse wav header"));
+        }
+        let wav_header = wav_header[0];
+
+        let pac_header = PacItemHeader {
+            unk1: 1,
+            unk2: 1,
+            unk3: wav_header.sample_rate,
+            sample_rate: wav_header.sample_rate * 2,
+            sample_size: wav_header.bit_depth / 8,
+            bit_depth: wav_header.bit_depth,
+            magic: [0, 0, 0, 0],
+            size1: 0,
+            unk6: 0,
+            unk7: 0,
+            size2: (wav.len() - size_of::<WavHeader>()) as u32
+        };
+        
+        let pac_header_as_ptr = [pac_header].as_ptr().cast();
+        let pac_header_as_bytes = unsafe { std::slice::from_raw_parts(pac_header_as_ptr, size_of::<PacItemHeader>()) };
+        output_file.write_all(pac_header_as_bytes)?;
+        output_file.write_all(&wav[size_of::<WavHeader>()..])?;
+        
+        write_size += size_of::<PacItemHeader>();
+        write_size += pac_header.size2 as usize;
+        let padding_size = align_up(write_size as u32, ITEM_ALIGN) as usize - write_size;
+        output_file.write_all(&vec![0; padding_size])?;
+    }
+
+    return Ok(());
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let program_mode = env::args().nth(1).expect("Not enough arguments");
+    let program_mode = program_mode.as_bytes();
+    if program_mode.len() < 2 || program_mode[0] as char != '-' {
+        panic!("Invalid argument");
+    }
+    match program_mode[1] as char {
+        'x' => {
+            let pac_path = env::args().nth(2).expect("Missing path argument");
+            return extract_pac(&pac_path);
+        },
+        'c' => {
+            let wav_paths = env::args().skip(2).collect::<Vec<_>>();
+            return create_pac(wav_paths);
+        },
+        _ => return Err(Box::from("Invalid mode argument"))
+    }
 }
