@@ -3,15 +3,27 @@ use std::fs;
 use std::io::Write;
 use std::mem::size_of;
 
+enum WaveFormat {
+    WaveFormatPcm = 1
+}
+
+// WAVEFORMATEX from dsound8
+#[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
+struct WaveFormatEx {
+    w_format_tag: u16,
+    n_channels: u16,
+    n_samples_per_sec: u32,
+    n_avg_bytes_per_sec: u32,
+    n_block_align: u16,
+    w_bits_per_sample: u16,
+    // cb_size: u16 // Field ignored by WAVE_FORMAT_PCM
+}
+
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
 struct PacItemHeader {
-    unk1: u16, // id?
-    unk2: u16, // sub id?
-    unk3: u32,
-    sample_rate: u32,
-    sample_size: u16,
-    bit_depth: u16, // sample bits?
+    wave_format: WaveFormatEx,
     magic: [u8; 4],
     size1: u32,
     unk6: u16,
@@ -65,9 +77,10 @@ fn extract_pac(pac_path: &str) -> Result<(), Box<dyn std::error::Error>> {
         if magic == "JU" {
             read_offset += 2;
         }
-        
-        let num_channels = 1;
-        let sample_rate = item_header.sample_rate / 2;
+    
+        let num_channels = item_header.wave_format.n_channels;
+        let sample_rate = item_header.wave_format.n_samples_per_sec;
+        let sample_size = item_header.wave_format.n_block_align;
         let output_path = format!("sample_{}.wav", item_counter);
         let audio_data = &file_contents[read_offset..read_offset + item_header.size2 as usize];
         let wav_header = WavHeader {
@@ -77,11 +90,11 @@ fn extract_pac(pac_path: &str) -> Result<(), Box<dyn std::error::Error>> {
             magic_fmt: "fmt ".as_bytes().try_into().unwrap(),
             fmt_chunk_size: 16,
             audio_format: 1,
-            num_channels: num_channels as u16,
+            num_channels: num_channels,
             sample_rate: sample_rate,
-            byte_rate: sample_rate * item_header.sample_size as u32 * num_channels as u32,
-            sample_align: item_header.sample_size * num_channels as u16,
-            bit_depth: 16,
+            byte_rate: sample_rate * sample_size as u32 * num_channels as u32,
+            sample_align: sample_size * num_channels as u16,
+            bit_depth: item_header.wave_format.w_bits_per_sample,
             magic_data: "data".as_bytes().try_into().unwrap(),
             audio_size: audio_data.len() as u32
         };
@@ -114,12 +127,14 @@ fn create_pac(wav_paths: Vec<String>) -> Result<(), Box<dyn std::error::Error>> 
         let wav_header = wav_header[0];
 
         let pac_header = PacItemHeader {
-            unk1: 1,
-            unk2: 1,
-            unk3: wav_header.sample_rate,
-            sample_rate: wav_header.sample_rate * 2,
-            sample_size: wav_header.bit_depth / 8,
-            bit_depth: wav_header.bit_depth,
+            wave_format: WaveFormatEx {
+                w_format_tag: WaveFormat::WaveFormatPcm as u16,
+                n_channels: 1,
+                n_samples_per_sec: wav_header.sample_rate,
+                n_avg_bytes_per_sec: wav_header.sample_rate * (wav_header.bit_depth / 8) as u32,
+                n_block_align: wav_header.bit_depth / 8,
+                w_bits_per_sample: wav_header.bit_depth
+            },
             magic: [0, 0, 0, 0],
             size1: 0,
             unk6: 0,
@@ -132,10 +147,13 @@ fn create_pac(wav_paths: Vec<String>) -> Result<(), Box<dyn std::error::Error>> 
         output_file.write_all(pac_header_as_bytes)?;
         output_file.write_all(&wav[size_of::<WavHeader>()..])?;
         
+        println!("{}: {:?}", write_size, pac_header);
+        
         write_size += size_of::<PacItemHeader>();
         write_size += pac_header.size2 as usize;
         let padding_size = align_up(write_size as u32, ITEM_ALIGN) as usize - write_size;
         output_file.write_all(&vec![0; padding_size])?;
+        write_size += padding_size;
     }
 
     return Ok(());
